@@ -209,3 +209,103 @@ class TestComputeQualityScore:
             "spc_out_of_control_ratio",
         ]
         assert len(df) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Correctness — analytic checks against known signals
+# --------------------------------------------------------------------------- #
+class TestSnrCorrectness:
+    def test_snr_matches_known_ratio(self) -> None:
+        # spatial-gradient signal image with known variance + iid noise of known variance
+        rng = np.random.default_rng(7)
+        h = w = 16
+        signal = np.tile(np.linspace(0.0, 200.0, w, dtype=np.float64), (h, 1))
+        signal_var = float(np.var(signal))
+        noise_std = 5.0
+        noise_var = noise_std ** 2
+        frames = signal[None, :, :] + rng.normal(0.0, noise_std, (10, h, w))
+        snr = quality.snr_per_sequence(frames)
+        expected = 10.0 * np.log10(signal_var / noise_var)
+        assert snr == pytest.approx(expected, rel=0.15)
+
+    def test_more_noise_lower_snr(self) -> None:
+        rng = np.random.default_rng(11)
+        base = np.tile(np.linspace(0.0, 200.0, 16), (16, 1))[None, :, :]
+        s_low = quality.snr_per_sequence(base + rng.normal(0, 2.0, (10, 16, 16)))
+        s_high = quality.snr_per_sequence(base + rng.normal(0, 20.0, (10, 16, 16)))
+        assert s_low > s_high
+
+    def test_flat_image_with_noise_returns_floor(self) -> None:
+        # frame-level brightness jitter: the temporal-mean image is spatially
+        # flat (no signal) while every frame is noisy -> SNR floor -60 dB
+        rng = np.random.default_rng(5)
+        t = 12
+        jitter = rng.normal(0.0, 10.0, t)  # one offset per frame, all pixels
+        frames = 120.0 + jitter[:, None, None]
+        assert quality.snr_per_sequence(frames) == -60.0
+
+
+class TestBaselineDriftFitting:
+    def test_slope_matches_injected(self) -> None:
+        # brightness increases exactly 3 per frame, no noise
+        frames = make_frames(20, base=80, drift=3.0)
+        r = quality.baseline_drift(frames)
+        assert r.slope == pytest.approx(3.0, abs=1e-9)
+        assert r.r2 > 0.999
+
+    def test_negative_slope(self) -> None:
+        rng = np.random.default_rng(1)
+        t, h, w = 20, 8, 8
+        idx = np.arange(t)[:, None, None]
+        frames = np.full((t, h, w), 150.0) - 2.0 * idx + rng.normal(0, 0.01, (t, h, w))
+        frames = np.clip(frames, 0, 255).astype(np.uint8)
+        r = quality.baseline_drift(frames)
+        assert r.slope == pytest.approx(-2.0, abs=0.01)
+        assert r.r2 > 0.99
+
+    def test_noisy_drift_slope_recovered(self) -> None:
+        # linear drift buried in noise: slope still recovered, R² high
+        rng = np.random.default_rng(2)
+        t, h, w = 40, 8, 8
+        idx = np.arange(t)[:, None, None]
+        frames = np.full((t, h, w), 100.0) + 1.5 * idx + rng.normal(0, 2.0, (t, h, w))
+        frames = np.clip(frames, 0, 255).astype(np.uint8)
+        r = quality.baseline_drift(frames)
+        assert r.slope == pytest.approx(1.5, abs=0.2)
+        assert r.r2 > 0.9
+
+
+class TestSpcControlLimits:
+    def test_injected_outliers_flagged(self) -> None:
+        rng = np.random.default_rng(3)
+        x = np.concatenate([rng.normal(0, 1, 1000), [10.0, -10.0, 8.0]])
+        ratio = quality.spc_out_of_control_ratio(x)
+        assert ratio > 0.0          # injected outliers exceed +/-3 sigma
+        assert ratio < 0.01         # ... but only a handful
+
+    def test_essentially_none_within_limits(self) -> None:
+        rng = np.random.default_rng(4)
+        x = rng.normal(0, 1, 5000)  # ~0.27% outside +/-3 sigma
+        assert quality.spc_out_of_control_ratio(x) < 0.01
+
+    def test_global_center_spread_threshold(self) -> None:
+        # center=10, spread=2 -> limits [4, 16]; 17 exceeds, 15 does not
+        f = np.array([10, 10, 10, 10, 17.0, 15.0])
+        r = quality.spc_out_of_control_ratio(f, center=10.0, spread=2.0)
+        assert r == pytest.approx(1.0 / 6.0)
+
+    def test_k_multiplier_tightens_limits(self) -> None:
+        # on a standard-normal sample, ±1σ flags ~31.7%, ±3σ flags ~0.27%
+        rng = np.random.default_rng(9)
+        x = rng.normal(0, 1, 4000)
+        loose = quality.spc_out_of_control_ratio(x, k=3.0)
+        tight = quality.spc_out_of_control_ratio(x, k=1.0)
+        assert tight > loose
+        assert tight == pytest.approx(0.317, abs=0.03)
+
+    def test_control_limits_match_three_sigma(self) -> None:
+        # center=50, spread=2 -> limits [44, 56]; boundary values not flagged
+        x = np.array([44.0, 56.0, 44.1, 55.9, 43.99, 56.01])
+        ratio = quality.spc_out_of_control_ratio(x, center=50.0, spread=2.0)
+        assert ratio == pytest.approx(2.0 / 6.0)
+

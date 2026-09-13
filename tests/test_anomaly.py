@@ -156,3 +156,61 @@ class TestDetectAnomalies:
         assert hasattr(rep, "stratified")
         assert hasattr(rep, "comparison")
         assert -1.0 <= rep.comparison.cohen_kappa <= 1.0
+
+
+# --------------------------------------------------------------------------- #
+# detection rate under known anomaly injection
+# --------------------------------------------------------------------------- #
+class TestDetectionRate:
+    def _injected_matrix(self, seed: int, n_normal: int = 200, n_anom: int = 20,
+                         dim: int = 6, shift: float = 10.0):
+        rng = np.random.default_rng(seed)
+        normal = rng.normal(0, 1, (n_normal, dim))
+        anomalies = rng.normal(0, 1, (n_anom, dim)) + shift
+        X = np.vstack([normal, anomalies])
+        return X, n_normal, n_anom
+
+    def test_isolation_forest_high_recall(self) -> None:
+        X, n_normal, n_anom = self._injected_matrix(seed=42)
+        res = anomaly.isolation_forest_anomaly(
+            X, contamination=n_anom / (n_normal + n_anom)
+        )
+        recall = int(((res.labels == -1)[n_normal:]).sum()) / n_anom
+        assert recall >= 0.8  # >=80% of injected anomalies detected
+
+    def test_isolation_forest_low_false_positive_rate(self) -> None:
+        # few normal samples mis-flagged alongside the true anomalies
+        X, n_normal, n_anom = self._injected_matrix(seed=7)
+        res = anomaly.isolation_forest_anomaly(
+            X, contamination=n_anom / (n_normal + n_anom)
+        )
+        fpr = int(((res.labels == -1)[:n_normal]).sum()) / n_normal
+        assert fpr < 0.05  # <5% of normals mis-flagged
+
+    def test_recall_stable_across_seeds(self) -> None:
+        # detection rate must not hinge on one lucky seed
+        recalls = []
+        for seed in (1, 2, 3, 4, 5):
+            X, n_normal, n_anom = self._injected_matrix(seed=seed)
+            res = anomaly.isolation_forest_anomaly(
+                X, contamination=n_anom / (n_normal + n_anom)
+            )
+            recalls.append(int(((res.labels == -1)[n_normal:]).sum()) / n_anom)
+        assert min(recalls) >= 0.8
+
+    def test_anomaly_scores_rank_injected_lower(self) -> None:
+        # decision_function: higher = more normal -> injected anomalies rank lower
+        X, n_normal, n_anom = self._injected_matrix(seed=11)
+        res = anomaly.isolation_forest_anomaly(
+            X, contamination=n_anom / (n_normal + n_anom)
+        )
+        assert res.scores[n_normal:].mean() < res.scores[:n_normal].mean()
+
+    def test_mahalanobis_high_recall(self) -> None:
+        X, n_normal, n_anom = self._injected_matrix(seed=0, dim=4, shift=8.0)
+        res = anomaly.mahalanobis_anomaly(
+            X, contamination=n_anom / (n_normal + n_anom)
+        )
+        recall = int(((res.labels == -1)[n_normal:]).sum()) / n_anom
+        assert recall >= 0.7
+
