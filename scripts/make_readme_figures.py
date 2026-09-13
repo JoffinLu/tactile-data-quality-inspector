@@ -51,7 +51,8 @@ for _i, m in enumerate(order):
     sub = df[df["material"] == m]
     fig.add_trace(
         go.Box(
-            y=sub["quality_score"], name=f"{m}<br>(n={len(sub)})",
+            # 单行标签更紧凑，避免斜排时互相挤压
+            y=sub["quality_score"], name=f"{m} (n={len(sub)})",
             marker_color="#4C78A8", line_color="#2b5d8a",
             fillcolor="rgba(76,120,168,0.45)", boxmean=True,
             showlegend=False, hovertemplate="%{y:.1f}<extra>" + m + "</extra>",
@@ -60,15 +61,21 @@ for _i, m in enumerate(order):
     )
 
 fig.update_xaxes(title_text="综合质量分（0–100）", row=1, col=1)
-fig.update_xaxes(tickangle=35, tickfont=dict(size=10), row=1, col=2)
+# 右图 x 轴必须显式设标题，否则 plotly 会继承左图的"综合质量分（0–100）"
+fig.update_xaxes(
+    title_text="材料类别", tickangle=30, tickfont=dict(size=10),
+    row=1, col=2,
+)
 fig.update_yaxes(title_text="序列数", row=1, col=1)
 fig.update_yaxes(title_text="综合质量分", range=[-2, 102], row=1, col=2)
 
 fig.update_layout(
-    width=1150, height=470,
+    # 全局关掉 legend；否则 plotly 会给无名箱线图显示 "trace 0"
+    showlegend=False,
+    width=1180, height=520,
     template="plotly_white",
     font=dict(family=FONT, size=13, color="#333"),
-    margin=dict(l=60, r=30, t=70, b=90),
+    margin=dict(l=70, r=30, t=70, b=90),
     title=dict(
         text="RCT 触觉数据集 — 每序列综合质量分分布（SNR / 漂移 / 饱和 / 力异常 / SPC 加权）",
         font=dict(size=16),
