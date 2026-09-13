@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tactile-qc"
-version = "0.1.0"
+version = "0.2.0"
 description = "Statistical quality assessment for robotic tactile (RCT) data"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,6 +17,7 @@ dependencies = [
     "plotly",
     "click",
     "pyyaml",
+    "pillow",
 ]
 
 [project.optional-dependencies]
@@ -30,5 +31,41 @@ tactile-qc = "tactile_qc.cli:cli"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+tactile_qc = ["py.typed"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "RUF"]
+ignore = [
+  "RUF001",  # ambiguous-unicode-char-string: Chinese fullwidth punctuation in docstrings
+  "RUF002",  # ambiguous-unicode-char-docstring
+  "RUF003",  # ambiguous-unicode-char-comment
+  "C408",    # unnecessary-collection-call: Counter()/dict() are intentional in places
+  "UP009",   # utf8-encoding-declaration: scripts carry an explicit coding header on purpose
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402", "B008"]
+"scripts/*" = ["E402", "T201"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+module = ["PIL.*", "plotly.*", "streamlit.*", "sklearn.*", "scipy.*", "click.*", "yaml.*"]
+ignore_missing_imports = true
+

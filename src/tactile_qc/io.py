@@ -27,11 +27,10 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Union
 
 import numpy as np
 
-PathLike = Union[str, Path]
+PathLike = str | Path
 
 #: ``depth_106.0.png`` and ``depth_106.png`` are both valid
 DEPTH_RE = re.compile(r"^depth_(\d+(?:\.\d+)?)\.png$")
@@ -82,13 +81,13 @@ class TactileSequence:
     material_label: str  # top-level category, e.g. "Plastic_Rubber"
     position: int
     sensor: int
-    frame_paths: List[Path]  # contact frames, sorted by depth value
+    frame_paths: list[Path]  # contact frames, sorted by depth value
     depth_values: np.ndarray  # (N,) tactile depth per frame
-    background_path: Optional[Path] = None
-    forces: Optional[np.ndarray] = None  # (T, 6) external F/T trace
-    raw_forces: Optional[np.ndarray] = None  # (T, 6) raw F/T trace
-    z_positions: Optional[np.ndarray] = None  # (T,) robot z during trace
-    robot_poses: Optional[np.ndarray] = None  # (T, 6) robot pose during trace
+    background_path: Path | None = None
+    forces: np.ndarray | None = None  # (T, 6) external F/T trace
+    raw_forces: np.ndarray | None = None  # (T, 6) raw F/T trace
+    z_positions: np.ndarray | None = None  # (T,) robot z during trace
+    robot_poses: np.ndarray | None = None  # (T, 6) robot pose during trace
     metadata: dict = field(default_factory=dict)
 
     def __len__(self) -> int:
@@ -98,35 +97,36 @@ class TactileSequence:
     def has_force(self) -> bool:
         return self.forces is not None and len(self.forces) > 0
 
-    def force_magnitude(self) -> Optional[np.ndarray]:
+    def force_magnitude(self) -> np.ndarray | None:
         """External force magnitude ||(fx, fy, fz)|| per time step."""
         if not self.has_force:
             return None
         return np.linalg.norm(self.forces[:, :3], axis=1)
 
-    def load_frames(self, max_frames: Optional[int] = None) -> np.ndarray:
+    def load_frames(self, max_frames: int | None = None) -> np.ndarray:
         """Load contact frames as a stacked RGB uint8 array (N, H, W, 3).
 
         Frames that cannot be decoded (corrupt/truncated PNGs) are skipped
         silently, so the returned array may contain fewer frames than
         ``len(self)``. Use :attr:`frame_paths` for the authoritative count.
         """
-        from PIL import Image
+        from PIL import Image, UnidentifiedImageError
 
         paths = self.frame_paths
         if max_frames is not None:
             paths = paths[:max_frames]
-        arrays = []
+        arrays: list[np.ndarray] = []
         for p in paths:
             try:
                 arrays.append(np.asarray(Image.open(p).convert("RGB")))
-            except Exception:
-                continue  # skip unreadable frame
+            except (UnidentifiedImageError, OSError, ValueError):
+                # truncated/corrupt PNG or non-image file -> skip silently
+                continue
         if not arrays:
             return np.empty((0, 0, 0, 3), dtype=np.uint8)
         return np.stack(arrays)
 
-    def load_background(self) -> Optional[np.ndarray]:
+    def load_background(self) -> np.ndarray | None:
         """Load the sensor background frame as an RGB uint8 array."""
         from PIL import Image
 
@@ -140,7 +140,7 @@ class RctDataset:
     """A loaded RCT dataset: an ordered collection of sequences."""
 
     data_dir: Path
-    sequences: List[TactileSequence]
+    sequences: list[TactileSequence]
 
     def __len__(self) -> int:
         return len(self.sequences)
@@ -176,16 +176,16 @@ class RctDataset:
         return pd.DataFrame(rows)
 
 
-def load_material_categories(data_dir: PathLike) -> Dict[int, str]:
+def load_material_categories(data_dir: PathLike) -> dict[int, str]:
     """Map material id (as int, leading zeros stripped) -> top category."""
     path = Path(data_dir) / "material_categories.json"
-    mapping: Dict[int, str] = {}
+    mapping: dict[int, str] = {}
     if not path.exists():
         return mapping
     for entry in json.loads(path.read_text(encoding="utf-8")):
         label = entry.get("top_category", "Unknown")
         for key in ("id", "id_short"):
-            if key in entry and entry[key]:
+            if entry.get(key):
                 try:
                     mapping[int(entry[key])] = label
                 except ValueError:
@@ -195,7 +195,7 @@ def load_material_categories(data_dir: PathLike) -> Dict[int, str]:
 
 def load_rct_sequences(
     data_dir: PathLike,
-    materials: Optional[List[str]] = None,
+    materials: list[str] | None = None,
     skip_missing_force: bool = False,
 ) -> RctDataset:
     """Load all RCT contact sequences under ``data_dir``.
@@ -235,7 +235,7 @@ def load_rct_sequences(
         wanted = set(materials)
         material_dirs = [d for d in material_dirs if d.name in wanted]
 
-    sequences: List[TactileSequence] = []
+    sequences: list[TactileSequence] = []
     for mat_dir in material_dirs:
         material_id = mat_dir.name.removeprefix("material_")
         try:

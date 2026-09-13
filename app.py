@@ -25,6 +25,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from scipy import stats as sp_stats
 
+from tactile_qc import __version__
 from tactile_qc.io import load_rct_sequences
 from tactile_qc.quality import _align_force_to_frames
 
@@ -56,8 +57,10 @@ def load_results() -> pd.DataFrame:
             how="left",
         )
     else:
+        merged = q
         for c in ("iso_label", "iso_score", "mahal_label", "mahal_score"):
-            merged = q.assign(**{c: np.nan}) if c not in q else q
+            if c not in merged.columns:
+                merged = merged.assign(**{c: np.nan})
     return merged
 
 
@@ -107,7 +110,7 @@ st.set_page_config(
 )
 
 st.title("Tactile Data Quality Inspector")
-st.caption("tactile-qc v0.1.0 — 统计质量评估 Dashboard")
+st.caption(f"tactile-qc v{__version__} — 统计质量评估 Dashboard")
 
 results = load_results()
 cmap = _color_map(list(results["material"].dropna().unique()))

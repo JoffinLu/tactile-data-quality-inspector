@@ -9,7 +9,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
-import pandas as pd
 import pytest
 
 from tactile_qc import quality
@@ -176,6 +175,7 @@ class TestComputeQualityScore:
         assert df.loc[0, "quality_score"] > df.loc[2, "quality_score"]
 
     def test_missing_force_excluded(self) -> None:
+        default_frames = make_frames(8, base=120)
         seq = SimpleNamespace(
             sequence_id="no_force",
             material_label="X",
@@ -183,7 +183,7 @@ class TestComputeQualityScore:
             forces=None,
             z_positions=None,
             depth_values=np.arange(8, dtype=float),
-            load_frames=lambda fr=make_frames(8, base=120): fr,
+            load_frames=lambda fr=default_frames: fr,
         )
         df = quality.compute_quality_score([seq])
         assert np.isnan(df.loc[0, "force_anomaly_ratio"])
@@ -308,4 +308,120 @@ class TestSpcControlLimits:
         x = np.array([44.0, 56.0, 44.1, 55.9, 43.99, 56.01])
         ratio = quality.spc_out_of_control_ratio(x, center=50.0, spread=2.0)
         assert ratio == pytest.approx(2.0 / 6.0)
+
+
+# --------------------------------------------------------------------------- #
+# single-pass assessment (assess_sequences) + parallel execution
+# --------------------------------------------------------------------------- #
+def _file_sequences(tmp_path) -> list:
+    """Real file-backed TactileSequence objects (PNG frames on disk).
+
+    Unlike the in-memory ``fake_seq`` stand-ins these are picklable and
+    carry ``frame_paths``, so they exercise the process-pool code path.
+    """
+    from PIL import Image
+
+    from tactile_qc.io import TactileSequence
+
+    seqs = []
+    for i in range(5):
+        d = tmp_path / f"seq_{i}"
+        d.mkdir()
+        t = 6
+        frames = make_frames(t, noise=2.0 + i, seed=i)
+        paths = []
+        for k in range(t):
+            p = d / f"depth_{float(k)}.png"
+            Image.fromarray(frames[k], mode="L").save(p)
+            paths.append(p)
+        forces = np.zeros((t, 6))
+        forces[:, 2] = 1.0 + 0.1 * i
+        seqs.append(
+            TactileSequence(
+                sequence_id=f"seq_{i}",
+                material_id="m",
+                material_label="Test",
+                position=0,
+                sensor=0,
+                frame_paths=paths,
+                depth_values=np.arange(t, dtype=float),
+                forces=forces,
+                z_positions=np.arange(t, dtype=float),
+            )
+        )
+    return seqs
+
+
+class TestAssessSequences:
+    def test_parallel_matches_serial_exactly(self, tmp_path) -> None:
+        seqs = _file_sequences(tmp_path)
+        serial = quality.assess_sequences(seqs, img_size=8)
+        par = quality.assess_sequences(seqs, img_size=8, n_jobs=2)
+        assert [a.sequence_id for a in par] == [a.sequence_id for a in serial]
+        for a, b in zip(serial, par):
+            assert a.snr == b.snr
+            assert a.drift_slope == b.drift_slope
+            assert a.saturation_ratio == b.saturation_ratio
+            assert a.force_anomaly_ratio == b.force_anomaly_ratio
+            assert a.spc_out_of_control_ratio == b.spc_out_of_control_ratio
+            assert a.n_frames == b.n_frames
+            assert a.frame_diff_mean == b.frame_diff_mean
+            np.testing.assert_array_equal(a.downscaled, b.downscaled)
+            np.testing.assert_array_equal(a.force_stats, b.force_stats)
+
+    def test_metrics_match_direct_computation(self, tmp_path) -> None:
+        # file-backed load_frames() returns RGB; channel-mean gray must give
+        # the same metrics as the grayscale arrays written to disk
+        seqs = _file_sequences(tmp_path)
+        frames = make_frames(6, noise=2.0, seed=0)  # seq_0's pixels
+        a = quality.assess_sequences(seqs[:1], img_size=8)[0]
+        assert a.snr == pytest.approx(quality.snr_per_sequence(frames))
+        assert a.saturation_ratio == pytest.approx(
+            quality.saturation_ratio(frames)
+        )
+
+    def test_in_memory_sequences_run_serially(self) -> None:
+        # SimpleNamespace + lambda is not picklable -> must fall back to
+        # serial without error even when n_jobs > 1
+        seqs = [fake_seq(f"s{i}", make_frames(6, noise=1.0 + i, seed=i)) for i in range(4)]
+        out = quality.assess_sequences(seqs, img_size=8, n_jobs=4)
+        assert [a.sequence_id for a in out] == [f"s{i}" for i in range(4)]
+
+    def test_broken_pool_falls_back_to_serial(self, tmp_path, monkeypatch) -> None:
+        # a ProcessPoolExecutor that cannot start must degrade to serial
+        # with a warning instead of crashing
+        import concurrent.futures as cf
+
+        class _BrokenPool:
+            def __init__(self, *a, **k):
+                raise RuntimeError("bootstrapping phase")
+
+        seqs = _file_sequences(tmp_path)
+        monkeypatch.setattr(cf, "ProcessPoolExecutor", _BrokenPool)
+        with pytest.warns(UserWarning, match="falling back to serial"):
+            out = quality.assess_sequences(seqs, img_size=8, n_jobs=2)
+        assert [a.sequence_id for a in out] == [f"seq_{i}" for i in range(5)]
+
+    def test_progress_callback(self) -> None:
+        seqs = [fake_seq(f"s{i}", make_frames(6, noise=1.0, seed=i)) for i in range(3)]
+        seen: list[tuple[int, int]] = []
+        quality.assess_sequences(seqs, img_size=8, progress=lambda d, t: seen.append((d, t)))
+        assert seen == [(1, 3), (2, 3), (3, 3)]
+
+    def test_requires_dataset_or_assessments(self) -> None:
+        with pytest.raises(ValueError, match="dataset or assessments"):
+            quality.compute_quality_score()
+
+
+class TestComputeQualityFromAssessments:
+    def test_assessments_reuse_matches_direct(self, tmp_path) -> None:
+        import pandas as pd
+
+        seqs = _file_sequences(tmp_path)
+        direct = quality.compute_quality_score(seqs)
+        reused = quality.compute_quality_score(
+            assessments=quality.assess_sequences(seqs)
+        )
+        pd.testing.assert_frame_equal(direct, reused)
+
 

@@ -76,8 +76,10 @@ class TestExtractFeatures:
             forces=None, z_positions=None, depth_values=np.arange(8, dtype=float),
             load_frames=lambda fr=frames: fr,
         )
-        feats = anomaly.extract_sequence_features([seq, fake_seq("b", make_frames(8, noise=2.0, seed=1))],
-                                                  pca_components=5, img_size=8)
+        feats = anomaly.extract_sequence_features(
+            [seq, fake_seq("b", make_frames(8, noise=2.0, seed=1))],
+            pca_components=5, img_size=8,
+        )
         assert not np.isnan(feats.X).any()  # NaN force stats imputed
 
 
@@ -213,4 +215,79 @@ class TestDetectionRate:
         )
         recall = int(((res.labels == -1)[n_normal:]).sum()) / n_anom
         assert recall >= 0.7
+
+
+# --------------------------------------------------------------------------- #
+# assessment reuse (single-pass pipeline) + batched PCA
+# --------------------------------------------------------------------------- #
+class TestAssessmentReuse:
+    def test_features_from_assessments_identical(self, small_dataset) -> None:
+        from tactile_qc.quality import assess_sequences
+
+        direct = anomaly.extract_sequence_features(
+            small_dataset, pca_components=5, img_size=8
+        )
+        reused = anomaly.extract_sequence_features(
+            pca_components=5,
+            img_size=8,
+            assessments=assess_sequences(small_dataset, img_size=8),
+        )
+        np.testing.assert_allclose(direct.X, reused.X)
+        assert direct.sequence_ids == reused.sequence_ids
+        assert direct.feature_names == reused.feature_names
+
+    def test_detect_anomalies_from_assessments(self, small_dataset) -> None:
+        from tactile_qc.quality import assess_sequences
+
+        assessments = assess_sequences(small_dataset, img_size=8)
+        rep = anomaly.detect_anomalies(
+            pca_components=5, img_size=8, contamination=0.2,
+            assessments=assessments,
+        )
+        assert len(rep.per_sequence) == 6
+
+    def test_img_size_mismatch_raises(self, small_dataset) -> None:
+        from tactile_qc.quality import assess_sequences
+
+        assessments = assess_sequences(small_dataset, img_size=8)
+        with pytest.raises(ValueError, match="img_size"):
+            anomaly.extract_sequence_features(
+                pca_components=5, img_size=16, assessments=assessments
+            )
+
+    def test_requires_dataset_or_assessments(self) -> None:
+        with pytest.raises(ValueError, match="dataset or assessments"):
+            anomaly.extract_sequence_features()
+
+    def test_empty_dataset_raises(self) -> None:
+        with pytest.raises(ValueError, match="empty"):
+            anomaly.extract_sequence_features([])
+
+
+class TestPcaBatches:
+    def test_exact_batch_boundaries(self) -> None:
+        # 12 rows total, batch_size 5 -> [5, 5, 2] (mirrors gen_batches)
+        stacks = [np.ones((3, 2)), np.ones((4, 2)), np.ones((5, 2))]
+        batches = list(anomaly._pca_batches(stacks, 5, min_rows=1))
+        assert [b.shape[0] for b in batches] == [5, 5, 2]
+
+    def test_short_tail_merged_into_previous(self) -> None:
+        # 513 rows, batch_size 512 -> tail of 1 row is below min_rows=4
+        # and must be merged into the previous batch
+        stacks = [np.ones((510, 2)), np.ones((3, 2))]
+        batches = list(anomaly._pca_batches(stacks, 512, min_rows=4))
+        assert [b.shape[0] for b in batches] == [513]
+
+    def test_values_and_order_preserved(self) -> None:
+        rng = np.random.default_rng(0)
+        stacks = [rng.normal(size=(n, 3)) for n in (7, 2, 9, 4)]
+        batches = list(anomaly._pca_batches(stacks, 5, min_rows=2))
+        joined = np.concatenate(batches, axis=0)
+        np.testing.assert_array_equal(joined, np.concatenate(stacks, axis=0))
+
+    def test_empty_stack_skipped(self) -> None:
+        stacks = [np.empty((0, 2)), np.ones((4, 2))]
+        batches = list(anomaly._pca_batches(stacks, 512, min_rows=1))
+        assert [b.shape[0] for b in batches] == [4]
+
 

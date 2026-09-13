@@ -39,7 +39,9 @@ class TestHtmlReport:
     def test_writes_selfcontained_html(self, tmp_path: Path) -> None:
         q, a = _sample_dfs()
         out = tmp_path / "report.html"
-        p = report.generate_html_report(q, a, out, dataset_stats={"material_count": 3, "total_frames": 96})
+        p = report.generate_html_report(
+            q, a, out, dataset_stats={"material_count": 3, "total_frames": 96}
+        )
         assert p == out and out.exists() and out.stat().st_size > 1000
         text = out.read_text(encoding="utf-8")
         assert "Plotly" in text  # inline plotly js present
@@ -65,3 +67,15 @@ class TestCsvExport:
         assert "seq_3" in set(prob["sequence_id"])
         r = prob.loc[prob["sequence_id"] == "seq_3", "reason"].iloc[0]
         assert "iso_anomaly" in r and "low_quality(<30)" in r and "spc_out_of_control" in r
+
+    def test_csv_export_without_spc_column(self, tmp_path: Path) -> None:
+        # quality frame missing the SPC column must not crash; seq_3 is
+        # still flagged via iso_anomaly + low_quality
+        q, a = _sample_dfs()
+        q = q.drop(columns=["spc_out_of_control_ratio"])
+        paths = report.generate_csv_export(q, a, tmp_path)
+        prob = pd.read_csv(paths["problem_samples"])
+        assert "seq_3" in set(prob["sequence_id"])
+        r = prob.loc[prob["sequence_id"] == "seq_3", "reason"].iloc[0]
+        assert "iso_anomaly" in r and "low_quality(<30)" in r
+        assert "spc" not in r

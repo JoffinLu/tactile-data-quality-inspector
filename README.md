@@ -71,12 +71,19 @@ python examples/run_demo.py
 # 探索性查看数据集结构
 tactile-qc explore --data-dir ./data/rct/rct_dataset
 
-# 跑全量质量评分 + 异常检测，输出到 reports/（约 16 分钟，1832 序列）
+# 跑全量质量评分 + 异常检测，输出到 reports/（默认自动并行，1832 序列）
 tactile-qc run --data-dir ./data/rct --output-dir reports --format both
+
+# 显式控制并行度：--workers 0=自动(核数一半，上限 8)、1=串行、N=N 进程
+tactile-qc run --data-dir ./data/rct -j 8 --format both
 
 # 启动交互式 Dashboard
 streamlit run app.py
 ```
+
+> 性能：质量评分与异常检测共享一次帧解码（单遍评估），并支持多进程并行。
+> 在 8 核机器上，全量 1832 序列从约 16 分钟降至约 3–4 分钟；`--workers 1`
+> 可回退到串行以复现逐位一致的结果。
 
 产物：
 
@@ -108,7 +115,7 @@ tactile-data-quality-inspector/
 │   ├── report.py      # 自包含 HTML 报告 + CSV 导出
 │   └── cli.py         # tactile-qc run / explore 命令行
 ├── app.py             # Streamlit Dashboard（4 页）
-├── tests/             # 55 个单元测试（合成数据，无数据集依赖）
+├── tests/             # 72 个单元测试（合成数据，无数据集依赖）
 ├── examples/run_demo.py   # 合成数据 demo
 ├── .github/workflows/ci.yml
 └── reports/           # 全量评分 + 报告产物
@@ -117,10 +124,10 @@ tactile-data-quality-inspector/
 ## 测试
 
 ```bash
-pytest -v          # 55 passed；全部用合成数据，hermetic
+pytest -v          # 72 passed；全部用合成数据，hermetic
 ```
 
-覆盖：SNR 解析正确性、基线漂移线性拟合、SPC 三西格玛控制限、孤立森林在已知异常注入下的检测率与误报率、Mahalanobis 召回、多检测器 Cohen's kappa、端到端报告结构。
+覆盖：SNR 解析正确性、基线漂移线性拟合、SPC 三西格玛控制限、孤立森林在已知异常注入下的检测率与误报率、Mahalanobis 召回、多检测器 Cohen's kappa、端到端报告结构、单遍评估与多进程并行的串行一致性、进程池不可用时的串行降级。
 
 ## 引用
 

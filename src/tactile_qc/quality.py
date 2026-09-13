@@ -33,8 +33,10 @@ Higher quality == higher ``snr`` and lower ``drift_slope`` /
 
 from __future__ import annotations
 
+import math
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -65,6 +67,58 @@ def _to_gray(frames: np.ndarray) -> np.ndarray:
             f"frames must be (T,H,W) or (T,H,W,C); got shape {arr.shape}"
         )
     return arr.astype(np.float64)
+
+
+# --------------------------------------------------------------------------- #
+# shared per-sequence feature helpers
+# (used by the anomaly stage; defined here so that process-pool workers
+#  only need this module and never import sklearn)
+# --------------------------------------------------------------------------- #
+def _downscale_gray(gray: np.ndarray, size: int) -> np.ndarray:
+    """Downscale a (T,H,W) grayscale stack to (T, size*size) float32."""
+    from PIL import Image
+
+    out = np.empty((gray.shape[0], size * size), dtype=np.float32)
+    for i, fr in enumerate(gray):
+        im = Image.fromarray(np.clip(fr, 0, 255).astype(np.uint8), mode="L")
+        im = im.resize((size, size))
+        out[i] = np.asarray(im, dtype=np.float32).ravel()
+    return out
+
+
+def _force_stats(force: np.ndarray | None) -> np.ndarray:
+    """``[mean, std, skew, kurt]`` of a force signal; NaNs if unavailable."""
+    if force is None or force.size == 0:
+        return np.full(4, np.nan)
+    x = np.asarray(force, dtype=np.float64).ravel()
+    std = float(np.std(x)) if x.size > 1 else 0.0
+    if x.size > 2 and np.std(x) > 0:
+        import warnings
+
+        from scipy import stats  # lazy: keeps module import light
+
+        # near-constant force traces can trigger a harmless precision-loss
+        # RuntimeWarning from the moment calculation; the finite guards below
+        # already handle any degraded result.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            skew = float(stats.skew(x, bias=False))
+            kurt = float(stats.kurtosis(x, bias=False))
+    else:
+        skew, kurt = 0.0, 0.0
+    # robust to scipy returning inf/nan on degenerate inputs
+    if not np.isfinite(skew):
+        skew = 0.0
+    if not np.isfinite(kurt):
+        kurt = 0.0
+    return np.array([float(x.mean()), std, skew, kurt])
+
+
+def _frame_diff_mean(gray: np.ndarray) -> float:
+    """Mean absolute pixel difference between consecutive frames."""
+    if gray.shape[0] < 2:
+        return 0.0
+    return float(np.abs(np.diff(gray, axis=0)).mean())
 
 
 # --------------------------------------------------------------------------- #
@@ -220,8 +274,8 @@ def force_anomaly_score(
 # --------------------------------------------------------------------------- #
 def spc_out_of_control_ratio(
     forces: np.ndarray,
-    center: Optional[float] = None,
-    spread: Optional[float] = None,
+    center: float | None = None,
+    spread: float | None = None,
     k: float = 3.0,
 ) -> float:
     """X-bar control-chart out-of-control ratio for a force signal.
@@ -260,9 +314,204 @@ def spc_out_of_control_ratio(
 
 
 # --------------------------------------------------------------------------- #
+# single-pass assessment (quality metrics + anomaly feature inputs)
+# --------------------------------------------------------------------------- #
+@dataclass
+class SequenceAssessment:
+    """One-pass per-sequence result: quality metrics + anomaly feature inputs.
+
+    Produced by :func:`assess_sequences`. Consumed by
+    :func:`compute_quality_score` (the metrics) and
+    :func:`tactile_qc.anomaly.extract_sequence_features` (the downscaled
+    pixel stacks / force statistics), so a quality+anomaly run decodes each
+    sequence's contact frames exactly once instead of twice.
+    """
+
+    sequence_id: str
+    material: str
+    snr: float
+    drift_slope: float
+    saturation_ratio: float
+    force_anomaly_ratio: float  # NaN when no usable force signal
+    spc_out_of_control_ratio: float  # NaN when no usable force signal
+    downscaled: np.ndarray  # (T, img_size**2) float32 — PCA input rows
+    n_frames: int
+    frame_diff_mean: float
+    force_stats: np.ndarray  # (4,) mean/std/skew/kurt of aligned ||F_ext||
+
+
+@dataclass(frozen=True)
+class _AssessParams:
+    """Picklable parameter bundle for the assessment worker."""
+
+    sat_tol: int = 5
+    anomaly_window: int = 11
+    anomaly_k: float = 3.0
+    spc_k: float = 3.0
+    img_size: int = 64
+
+
+def _assess_one(seq: Any, p: _AssessParams) -> SequenceAssessment:
+    """Decode one sequence's frames once and compute everything needed."""
+    frames = seq.load_frames()
+    gray = _to_gray(frames)
+    drift = baseline_drift(gray)
+    snr = snr_per_sequence(gray)
+    sat = saturation_ratio(gray, tol=p.sat_tol)
+    fmag = _align_force_to_frames(seq)
+    if fmag is not None and fmag.size > 0:
+        fa = force_anomaly_score(fmag, window=p.anomaly_window, k=p.anomaly_k)
+        spc = spc_out_of_control_ratio(fmag, k=p.spc_k)
+    else:
+        fa = float("nan")
+        spc = float("nan")
+    return SequenceAssessment(
+        sequence_id=seq.sequence_id,
+        material=getattr(seq, "material_label", "Unknown"),
+        snr=snr,
+        drift_slope=drift.slope,
+        saturation_ratio=sat,
+        force_anomaly_ratio=fa,
+        spc_out_of_control_ratio=spc,
+        downscaled=_downscale_gray(gray, p.img_size),
+        n_frames=int(gray.shape[0]),
+        frame_diff_mean=_frame_diff_mean(gray),
+        force_stats=_force_stats(fmag),
+    )
+
+
+def _assess_task(payload: tuple[Any, _AssessParams]) -> SequenceAssessment:
+    """Top-level worker entry for :class:`ProcessPoolExecutor`."""
+    seq, params = payload
+    return _assess_one(seq, params)
+
+
+def _can_parallel(seqs: list[Any], n_jobs: int | None) -> bool:
+    """Parallel mode requires picklable, file-backed sequences."""
+    return (
+        n_jobs is not None
+        and n_jobs > 1
+        and len(seqs) > 1
+        and all(hasattr(s, "frame_paths") for s in seqs)
+    )
+
+
+def _assess_parallel(
+    seqs: list[Any],
+    params: _AssessParams,
+    n_jobs: int,
+    progress: Callable[[int, int], None],
+) -> list[SequenceAssessment]:
+    """Run :func:`_assess_one` across a process pool, preserving order.
+
+    Falls back to serial execution with a warning when the pool cannot be
+    used (e.g. the calling script lacks an ``if __name__ == "__main__"``
+    guard on Windows, or the pool workers die) — correctness beats speed.
+    """
+    import warnings
+    from concurrent.futures import ProcessPoolExecutor
+    from concurrent.futures.process import BrokenProcessPool
+
+    total = len(seqs)
+    chunk = max(1, total // (n_jobs * 4))
+    try:
+        with ProcessPoolExecutor(max_workers=n_jobs) as pool:
+            gen = pool.map(
+                _assess_task, ((s, params) for s in seqs), chunksize=chunk
+            )
+            out: list[SequenceAssessment] = []
+            for i, res in enumerate(gen, start=1):
+                out.append(res)
+                progress(i, total)
+            return out
+    except (RuntimeError, BrokenProcessPool) as exc:
+        warnings.warn(
+            f"process pool unavailable ({exc}); falling back to serial "
+            "assessment. Hint: on Windows/macOS call assess_sequences from "
+            "inside an `if __name__ == '__main__':` block when using "
+            "n_jobs > 1.",
+            stacklevel=2,
+        )
+    out = []
+    for i, seq in enumerate(seqs, start=1):
+        out.append(_assess_one(seq, params))
+        progress(i, total)
+    return out
+
+
+def assess_sequences(
+    dataset: Iterable[Any],
+    sat_tol: int = 5,
+    anomaly_window: int = 11,
+    anomaly_k: float = 3.0,
+    spc_k: float = 3.0,
+    img_size: int = 64,
+    n_jobs: int | None = None,
+    progress: Callable[[int, int], None] | None = None,
+) -> list[SequenceAssessment]:
+    """Assess every sequence in a single pass over the decoded frames.
+
+    This is the one-pass core of the pipeline: each sequence's contact
+    frames are decoded exactly once and yield BOTH the quality metrics and
+    the raw inputs needed by the anomaly stage (downscaled pixel stacks,
+    force statistics, frame-diff proxy). Running quality + anomaly from one
+    ``assess_sequences`` call halves the frame-decoding I/O of running the
+    two stages separately.
+
+    Parameters
+    ----------
+    dataset : Iterable
+        Sequence objects exposing ``load_frames()`` (see
+        :func:`compute_quality_score` for the duck-typed interface).
+    sat_tol, anomaly_window, anomaly_k, spc_k :
+        Forwarded to the underlying metric functions.
+    img_size : int, default 64
+        Downscale size for the anomaly-stage pixel features.
+    n_jobs : int, optional
+        Number of worker processes. ``None`` or ``<= 1`` runs serially in
+        the current process (default). ``> 1`` uses a
+        :class:`concurrent.futures.ProcessPoolExecutor`; sequences that are
+        not file-backed (no ``frame_paths`` attribute, e.g. synthetic
+        in-memory datasets) always run serially because they may not be
+        picklable. If the pool cannot start (e.g. the calling script lacks
+        an ``if __name__ == "__main__"`` guard on Windows), the run falls
+        back to serial with a warning.
+    progress : callable, optional
+        ``progress(done, total)`` invoked from the parent process after
+        every completed sequence (serial) or returned result (parallel).
+
+    Returns
+    -------
+    list[SequenceAssessment]
+        One assessment per sequence, in input order.
+    """
+
+    def _no_progress(done: int, total: int) -> None:  # pragma: no cover
+        pass
+
+    cb = progress if progress is not None else _no_progress
+    seqs = list(dataset)
+    params = _AssessParams(
+        sat_tol=sat_tol,
+        anomaly_window=anomaly_window,
+        anomaly_k=anomaly_k,
+        spc_k=spc_k,
+        img_size=img_size,
+    )
+    if _can_parallel(seqs, n_jobs):
+        return _assess_parallel(seqs, params, n_jobs, cb)
+    out: list[SequenceAssessment] = []
+    total = len(seqs)
+    for i, seq in enumerate(seqs, start=1):
+        out.append(_assess_one(seq, params))
+        cb(i, total)
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Module 3 — composite quality score
 # --------------------------------------------------------------------------- #
-def _align_force_to_frames(seq: Any) -> Optional[np.ndarray]:
+def _align_force_to_frames(seq: Any) -> np.ndarray | None:
     """Align a sequence's force trace to its contact frames.
 
     The RCT force trace covers approach + contact (longer than the frame
@@ -306,12 +555,14 @@ def _minmax(values: np.ndarray, higher_is_better: bool) -> np.ndarray:
 
 
 def compute_quality_score(
-    dataset: Iterable[Any],
-    weights: Optional[Mapping[str, float]] = None,
+    dataset: Iterable[Any] | None = None,
+    weights: Mapping[str, float] | None = None,
     sat_tol: int = 5,
     anomaly_window: int = 11,
     anomaly_k: float = 3.0,
     spc_k: float = 3.0,
+    n_jobs: int | None = None,
+    assessments: list[SequenceAssessment] | None = None,
 ) -> pd.DataFrame:
     """Compute a composite 0-100 quality score for every sequence.
 
@@ -326,17 +577,24 @@ def compute_quality_score(
 
     Parameters
     ----------
-    dataset : Iterable
+    dataset : Iterable, optional
         Anything iterable of sequence objects. Each sequence must expose
         ``load_frames()`` -> (T,H,W[,C]) array, ``sequence_id``,
         ``material_label``, ``forces`` (T,6), ``z_positions`` (T,) and
         ``depth_values`` (T,) — i.e. :class:`tactile_qc.io.TactileSequence`.
+        May be omitted when ``assessments`` is given.
     weights : Mapping[str, float], optional
         Component weights with keys in
         ``{snr, drift, saturation, force_anomaly, spc}``.
         Defaults to :data:`DEFAULT_WEIGHTS`.
     sat_tol, anomaly_window, anomaly_k, spc_k :
-        Forwarded to the underlying metric functions.
+        Forwarded to the underlying metric functions (ignored when
+        ``assessments`` is given — they were already applied there).
+    n_jobs : int, optional
+        Worker processes for :func:`assess_sequences` (serial by default).
+    assessments : list of SequenceAssessment, optional
+        Reuse a previous :func:`assess_sequences` run instead of decoding
+        the frames again (single-pass quality + anomaly pipelines).
 
     Returns
     -------
@@ -345,37 +603,33 @@ def compute_quality_score(
         saturation_ratio, force_anomaly_ratio, spc_out_of_control_ratio``.
         ``quality_score`` is in ``[0, 100]`` (NaN if no metric available).
     """
+    if assessments is None:
+        if dataset is None:
+            raise ValueError("either dataset or assessments must be provided")
+        assessments = assess_sequences(
+            dataset,
+            sat_tol=sat_tol,
+            anomaly_window=anomaly_window,
+            anomaly_k=anomaly_k,
+            spc_k=spc_k,
+            n_jobs=n_jobs,
+        )
     w = dict(DEFAULT_WEIGHTS)
     if weights is not None:
         w.update({k: float(v) for k, v in weights.items()})
 
-    rows: list[dict[str, Any]] = []
-    for seq in dataset:
-        frames = seq.load_frames()
-        gray = _to_gray(frames)
-        drift = baseline_drift(gray)
-        snr = snr_per_sequence(gray)
-        sat = saturation_ratio(gray, tol=sat_tol)
-        fmag = _align_force_to_frames(seq)
-        if fmag is not None and fmag.size > 0:
-            fa = force_anomaly_score(
-                fmag, window=anomaly_window, k=anomaly_k
-            )
-            spc = spc_out_of_control_ratio(fmag, k=spc_k)
-        else:
-            fa = float("nan")
-            spc = float("nan")
-        rows.append(
-            {
-                "sequence_id": seq.sequence_id,
-                "material": getattr(seq, "material_label", "Unknown"),
-                "snr": snr,
-                "drift_slope": drift.slope,
-                "saturation_ratio": sat,
-                "force_anomaly_ratio": fa,
-                "spc_out_of_control_ratio": spc,
-            }
-        )
+    rows: list[dict[str, Any]] = [
+        {
+            "sequence_id": a.sequence_id,
+            "material": a.material,
+            "snr": a.snr,
+            "drift_slope": a.drift_slope,
+            "saturation_ratio": a.saturation_ratio,
+            "force_anomaly_ratio": a.force_anomaly_ratio,
+            "spc_out_of_control_ratio": a.spc_out_of_control_ratio,
+        }
+        for a in assessments
+    ]
 
     cols = [
         "sequence_id",

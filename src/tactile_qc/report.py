@@ -13,9 +13,10 @@ Public API
 
 from __future__ import annotations
 
-from datetime import datetime
+from collections.abc import Mapping
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -27,7 +28,8 @@ body { font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-se
        max-width: 1080px; margin: 0 auto; padding: 32px 24px; color: #1f2328;
        background: #ffffff; line-height: 1.55; }
 h1 { font-size: 26px; margin: 0 0 4px 0; }
-h2 { font-size: 19px; margin: 28px 0 10px 0; border-bottom: 1px solid #e6e8eb; padding-bottom: 6px; }
+h2 { font-size: 19px; margin: 28px 0 10px 0;
+     border-bottom: 1px solid #e6e8eb; padding-bottom: 6px; }
 .meta { color: #6b7280; font-size: 13px; margin-bottom: 8px; }
 .stat { display: inline-block; background: #f3f4f6; border-radius: 8px; padding: 8px 14px;
         margin: 4px 8px 4px 0; font-size: 14px; }
@@ -41,8 +43,14 @@ tr.anom { background: #fff5f5; }
 .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; }
 .badge-anom { background: #fee2e2; color: #b91c1c; }
 .badge-ok { background: #dcfce7; color: #166534; }
-footer { color: #9ca3af; font-size: 12px; margin-top: 32px; border-top: 1px solid #e6e8eb; padding-top: 10px; }
+footer { color: #9ca3af; font-size: 12px; margin-top: 32px;
+         border-top: 1px solid #e6e8eb; padding-top: 10px; }
 """
+
+
+def _now_str() -> str:
+    """Local-time stamp with timezone label for the report header."""
+    return datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
 def _key_findings(quality_df: pd.DataFrame, anomaly_df: pd.DataFrame) -> list[str]:
@@ -83,8 +91,8 @@ def _key_findings(quality_df: pd.DataFrame, anomaly_df: pd.DataFrame) -> list[st
 
 
 def _overview_stats(
-    quality_df: pd.DataFrame, dataset_stats: Optional[Mapping[str, Any]] = None
-) -> tuple[int, Optional[int], Optional[int]]:
+    quality_df: pd.DataFrame, dataset_stats: Mapping[str, Any] | None = None
+) -> tuple[int, int | None, int | None]:
     """Return (sequence_count, material_count, total_frames)."""
     n_seq = len(quality_df)
     n_mat = dataset_stats.get("material_count") if dataset_stats else None
@@ -96,7 +104,7 @@ def generate_html_report(
     quality_df: pd.DataFrame,
     anomaly_df: pd.DataFrame,
     output_path: str | Path,
-    dataset_stats: Optional[Mapping[str, Any]] = None,
+    dataset_stats: Mapping[str, Any] | None = None,
 ) -> Path:
     """Write a self-contained HTML quality report.
 
@@ -141,7 +149,7 @@ def generate_html_report(
     hist.update_layout(
         title="质量评分分布", xaxis_title="quality_score",
         yaxis_title="序列数", bargap=0.02, height=340,
-        margin=dict(l=40, r=20, t=50, b=40),
+        margin={"l": 40, "r": 20, "t": 50, "b": 40},
     )
 
     # --- plot 2: quality-score box by material ---
@@ -158,7 +166,7 @@ def generate_html_report(
     box.update_layout(
         title="按材料类别的质量评分", boxmode="group", height=380,
         xaxis_tickangle=-25, yaxis_title="quality_score",
-        margin=dict(l=40, r=20, t=50, b=80),
+        margin={"l": 40, "r": 20, "t": 50, "b": 80},
         showlegend=False,
     )
 
@@ -173,13 +181,13 @@ def generate_html_report(
             row_open
             + f"<td>{r['sequence_id']}</td><td>{r.get('material', '')}</td>"
             + (
-                f"<td><span class='badge badge-anom'>异常</span></td>"
+                "<td><span class='badge badge-anom'>异常</span></td>"
                 if iso_bad
                 else "<td><span class='badge badge-ok'>正常</span></td>"
             )
             + f"<td>{r['iso_score']:.4f}</td>"
             + (
-                f"<td><span class='badge badge-anom'>异常</span></td>"
+                "<td><span class='badge badge-anom'>异常</span></td>"
                 if mah_bad
                 else "<td><span class='badge badge-ok'>正常</span></td>"
             )
@@ -207,7 +215,7 @@ def generate_html_report(
 </head>
 <body>
 <h1>RCT 触觉数据质量报告</h1>
-<div class="meta">生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} · tactile-qc</div>
+<div class="meta">生成时间：{_now_str()} · tactile-qc</div>
 
 <h2>数据集概览</h2>
 <div>{stats_html}</div>
@@ -279,17 +287,17 @@ def generate_csv_export(
             flags.append("iso_anomaly")
         if row["quality_score"] < 30:
             flags.append("low_quality(<30)")
-        if pd.notna(row.get("spc_out_of_control_ratio")) and row["spc_out_of_control_ratio"] > 0.1:
+        spc = row.get("spc_out_of_control_ratio")
+        if spc is not None and pd.notna(spc) and spc > 0.1:
             flags.append("spc_out_of_control>0.1")
         return ";".join(flags)
 
     problems = merged.copy()
     problems["reason"] = problems.apply(_reasons, axis=1)
-    mask = (
-        (problems["iso_label"] == -1)
-        | (problems["quality_score"] < 30)
-        | (problems["spc_out_of_control_ratio"] > 0.1)
-    )
+    spc_col = "spc_out_of_control_ratio"
+    mask = (problems["iso_label"] == -1) | (problems["quality_score"] < 30)
+    if spc_col in problems.columns:
+        mask = mask | (problems[spc_col].fillna(0.0) > 0.1)
     problems = problems.loc[mask].sort_values("quality_score")
     prob_path = out / "problem_samples.csv"
     problems.to_csv(prob_path, index=False)

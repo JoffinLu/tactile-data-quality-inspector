@@ -37,75 +37,24 @@ Shape assumptions
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Iterable, Optional
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import pandas as pd
 from scipy import stats
-from sklearn.covariance import EmpiricalCovariance
 from sklearn.decomposition import IncrementalPCA
 from sklearn.ensemble import IsolationForest
 from sklearn.metrics import cohen_kappa_score
 from sklearn.preprocessing import StandardScaler
 
-from .quality import _align_force_to_frames
+from .quality import SequenceAssessment
 
 #: force statistical feature names
 _FORCE_FEATURES = ("force_mean", "force_std", "force_skew", "force_kurt")
 #: extra (non-PCA) feature names
 _EXTRA_FEATURES = ("n_frames", "frame_diff_mean")
-
-
-# --------------------------------------------------------------------------- #
-# small helpers
-# --------------------------------------------------------------------------- #
-def _to_gray(frames: np.ndarray) -> np.ndarray:
-    """Coerce ``frames`` to a float64 grayscale array of shape (T, H, W)."""
-    arr = np.asarray(frames)
-    if arr.ndim == 4:
-        arr = arr.mean(axis=-1)
-    elif arr.ndim != 3:
-        raise ValueError(f"frames must be (T,H,W) or (T,H,W,C); got {arr.shape}")
-    return arr.astype(np.float64)
-
-
-def _downscale_gray(gray: np.ndarray, size: int) -> np.ndarray:
-    """Downscale a (T,H,W) grayscale stack to (T, size*size) float32."""
-    from PIL import Image
-
-    out = np.empty((gray.shape[0], size * size), dtype=np.float32)
-    for i, fr in enumerate(gray):
-        im = Image.fromarray(np.clip(fr, 0, 255).astype(np.uint8), mode="L")
-        im = im.resize((size, size))
-        out[i] = np.asarray(im, dtype=np.float32).ravel()
-    return out
-
-
-def _force_stats(force: Optional[np.ndarray]) -> np.ndarray:
-    """``[mean, std, skew, kurt]`` of a force signal; NaNs if unavailable."""
-    if force is None or force.size == 0:
-        return np.full(4, np.nan)
-    x = np.asarray(force, dtype=np.float64).ravel()
-    std = float(np.std(x)) if x.size > 1 else 0.0
-    if x.size > 2 and np.std(x) > 0:
-        skew = float(stats.skew(x, bias=False))
-        kurt = float(stats.kurtosis(x, bias=False))
-    else:
-        skew, kurt = 0.0, 0.0
-    # robust to scipy returning inf/nan on degenerate inputs
-    if not np.isfinite(skew):
-        skew = 0.0
-    if not np.isfinite(kurt):
-        kurt = 0.0
-    return np.array([float(x.mean()), std, skew, kurt])
-
-
-def _frame_diff_mean(gray: np.ndarray) -> float:
-    """Mean absolute pixel difference between consecutive frames."""
-    if gray.shape[0] < 2:
-        return 0.0
-    return float(np.abs(np.diff(gray, axis=0)).mean())
 
 
 # --------------------------------------------------------------------------- #
@@ -120,30 +69,76 @@ class AnomalyFeatures:
     materials: list[str]
     feature_names: list[str]
     n_pca: int = 0
-    pca: Optional[IncrementalPCA] = None
-    scaler: Optional[StandardScaler] = None
+    pca: IncrementalPCA | None = None
+    scaler: StandardScaler | None = None
+
+
+def _pca_batches(
+    stacks: list[np.ndarray], batch_size: int, min_rows: int
+) -> Iterable[np.ndarray]:
+    """Yield ``batch_size``-row chunks of the virtual concatenation of *stacks*.
+
+    Batch boundaries sit at exact multiples of ``batch_size`` — matching what
+    ``IncrementalPCA.fit`` would slice internally on the concatenated matrix —
+    but the concatenation is never materialised, so peak memory holds one
+    batch instead of a full second copy of all stacks. A final short chunk is
+    merged into the previous batch so every yielded batch has at least
+    ``min_rows`` rows (``partial_fit`` requires ``n_samples >= n_components``).
+    """
+    batches: list[list[np.ndarray]] = []
+    cur: list[np.ndarray] = []
+    cur_rows = 0
+    for s in stacks:
+        view = s
+        while view.shape[0]:
+            if cur_rows >= batch_size:
+                batches.append(cur)
+                cur, cur_rows = [], 0
+            take = batch_size - cur_rows
+            part, view = view[:take], view[take:]
+            cur.append(part)
+            cur_rows += part.shape[0]
+    if cur_rows:
+        batches.append(cur)
+    if len(batches) >= 2 and sum(b.shape[0] for b in batches[-1]) < min_rows:
+        batches[-2].extend(batches.pop())
+    for parts in batches:
+        yield np.concatenate(parts, axis=0)
 
 
 def extract_sequence_features(
-    dataset: Iterable[Any],
+    dataset: Iterable[Any] | None = None,
     pca_components: int = 20,
     img_size: int = 64,
     random_state: int = 42,
+    n_jobs: int | None = None,
+    assessments: list[SequenceAssessment] | None = None,
 ) -> AnomalyFeatures:
     """Build the per-sequence feature matrix.
 
     Parameters
     ----------
-    dataset : Iterable
+    dataset : Iterable, optional
         Iterable of sequence objects (see
         :func:`tactile_qc.quality.compute_quality_score` for the duck-typed
         interface — ``load_frames()``, ``sequence_id``, ``material_label``,
-        ``forces``, ``z_positions``, ``depth_values``).
+        ``forces``, ``z_positions``, ``depth_values``). May be omitted when
+        ``assessments`` is given.
     pca_components : int, default 20
         Number of PCA dimensions. Clamped to ``min(n_frames_total, img_size**2)``.
     img_size : int, default 64
-        Frames are downscaled to ``img_size x img_size`` grayscale before PCA.
+        Expected downscale size of the assessments. Ignored when
+        ``dataset`` is given (the assessments are created at this size);
+        when ``assessments`` is given it must match their size or a
+        ``ValueError`` is raised.
     random_state : int, default 42
+        Kept for API stability (IncrementalPCA is deterministic).
+    n_jobs : int, optional
+        Worker processes for :func:`tactile_qc.quality.assess_sequences`
+        (serial by default; only used when ``dataset`` is given).
+    assessments : list of SequenceAssessment, optional
+        Reuse a previous :func:`tactile_qc.quality.assess_sequences` run —
+        the frames are not decoded a second time.
 
     Returns
     -------
@@ -152,38 +147,52 @@ def extract_sequence_features(
         that are NaN (no force trace) are imputed with the column mean before
         standardization.
     """
-    seq_ids: list[str] = []
-    materials: list[str] = []
-    frame_stacks: list[np.ndarray] = []
-    force_rows: list[np.ndarray] = []
-    len_list: list[int] = []
-    diff_list: list[float] = []
+    from .quality import assess_sequences
 
-    for seq in dataset:
-        raw = seq.load_frames()
-        gray = _to_gray(raw)
-        ds = _downscale_gray(gray, img_size)
-        frame_stacks.append(ds)
-        seq_ids.append(seq.sequence_id)
-        materials.append(getattr(seq, "material_label", "Unknown"))
-        force_rows.append(_force_stats(_align_force_to_frames(seq)))
-        len_list.append(int(gray.shape[0]))
-        diff_list.append(_frame_diff_mean(gray))
+    if assessments is None:
+        if dataset is None:
+            raise ValueError("either dataset or assessments must be provided")
+        assessments = assess_sequences(
+            dataset, img_size=img_size, n_jobs=n_jobs
+        )
+    if not assessments:
+        raise ValueError("no sequences to analyse — dataset is empty")
 
-    all_frames = np.concatenate(frame_stacks, axis=0)  # (sum_T, img_size**2)
-    n_comp = min(pca_components, all_frames.shape[0], all_frames.shape[1])
-    pca = IncrementalPCA(
-        n_components=n_comp,
-        batch_size=min(512, all_frames.shape[0]),
+    seq_ids = [a.sequence_id for a in assessments]
+    materials = [a.material for a in assessments]
+    frame_stacks = [a.downscaled for a in assessments]
+    force_arr = np.stack([a.force_stats for a in assessments])  # (n_seq, 4)
+    extra = np.column_stack(
+        [
+            np.asarray([a.n_frames for a in assessments], dtype=float),
+            np.asarray([a.frame_diff_mean for a in assessments], dtype=float),
+        ]
     )
-    pca.fit(all_frames)
+
+    n_feat = frame_stacks[0].shape[1]
+    if img_size is not None and n_feat and n_feat != img_size * img_size:
+        from math import isqrt
+
+        raise ValueError(
+            f"assessments were computed at img_size={isqrt(n_feat)} but "
+            f"img_size={img_size} was requested; re-run assess_sequences "
+            "with the matching size"
+        )
+
+    total_frames = sum(s.shape[0] for s in frame_stacks)
+    n_comp = min(pca_components, total_frames, n_feat)
+    if n_comp < 1:
+        raise ValueError(
+            "no decodable frames found — cannot fit PCA (check the "
+            "dataset's contact_frames/ images)"
+        )
+    batch_size = min(512, total_frames)
+    pca = IncrementalPCA(n_components=n_comp, batch_size=batch_size)
+    for batch in _pca_batches(frame_stacks, batch_size, min_rows=n_comp):
+        pca.partial_fit(batch)
 
     pca_rows = [pca.transform(ds).mean(axis=0) for ds in frame_stacks]
     X_pca = np.stack(pca_rows)  # (n_seq, n_comp)
-    force_arr = np.stack(force_rows)  # (n_seq, 4)
-    extra = np.column_stack(
-        [np.asarray(len_list, dtype=float), np.asarray(diff_list, dtype=float)]
-    )
     X_raw = np.hstack([X_pca, force_arr, extra]).astype(np.float64)
 
     # impute NaN force features with column means
@@ -296,7 +305,7 @@ def mahalanobis_anomaly(
     diff = X - mu
     d2 = np.einsum("ij,jk,ik->i", diff, inv, diff)
     d2 = np.clip(d2, 0.0, None)
-    if n > p and p >= 1:
+    if n > p >= 1:
         thresh = float(stats.chi2.ppf(1.0 - contamination, df=p))
     else:
         thresh = float(np.quantile(d2, 1.0 - contamination))
@@ -413,24 +422,33 @@ class AnomalyReport:
 
 
 def detect_anomalies(
-    dataset: Iterable[Any],
+    dataset: Iterable[Any] | None = None,
     contamination: float = 0.05,
     pca_components: int = 20,
     img_size: int = 64,
     random_state: int = 42,
+    n_jobs: int | None = None,
+    assessments: list[SequenceAssessment] | None = None,
 ) -> AnomalyReport:
     """End-to-end anomaly detection: features -> IF + Mahalanobis -> eval.
 
     Parameters
     ----------
-    dataset : Iterable
+    dataset : Iterable, optional
         Iterable of sequence objects (see
-        :func:`extract_sequence_features`).
+        :func:`extract_sequence_features`). May be omitted when
+        ``assessments`` is given.
     contamination : float, default 0.05
         Expected anomaly fraction (forwarded to both detectors).
     pca_components, img_size, random_state :
         Forwarded to :func:`extract_sequence_features` /
         :func:`isolation_forest_anomaly`.
+    n_jobs : int, optional
+        Worker processes for :func:`tactile_qc.quality.assess_sequences`
+        (serial by default; only used when ``dataset`` is given).
+    assessments : list of SequenceAssessment, optional
+        Reuse a previous :func:`tactile_qc.quality.assess_sequences` run —
+        the frames are not decoded a second time.
 
     Returns
     -------
@@ -444,6 +462,8 @@ def detect_anomalies(
         pca_components=pca_components,
         img_size=img_size,
         random_state=random_state,
+        n_jobs=n_jobs,
+        assessments=assessments,
     )
     iso = isolation_forest_anomaly(
         feats.X, contamination=contamination, random_state=random_state

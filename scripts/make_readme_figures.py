@@ -47,7 +47,7 @@ order = (
     df.groupby("material")["quality_score"].median()
     .sort_values(ascending=False).index.tolist()
 )
-for i, m in enumerate(order):
+for _i, m in enumerate(order):
     sub = df[df["material"] == m]
     fig.add_trace(
         go.Box(
