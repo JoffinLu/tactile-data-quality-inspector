@@ -4,7 +4,7 @@
 
 **对机器人触觉数据做统计质量评估的命令行 + Dashboard 工具箱**
 
-[![CI](https://img.shields.io/github/actions/workflow/status/<OWNER>/tactile-data-quality-inspector/ci.yml?branch=main&label=tests)](.github/workflows/ci.yml)
+[![CI](https://img.shields.io/github/actions/workflow/status/JoffinLu/tactile-data-quality-inspector/ci.yml?branch=main&label=tests)](.github/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](#安装)
 [![License](https://img.shields.io/badge/license-MIT-green)](#license)
 [![PyPI](https://img.shields.io/pypi/v/tactile-qc)](https://pypi.org/project/tactile-qc/)
@@ -46,7 +46,7 @@
 pip install tactile-qc
 
 # 方式二：从源码（开发模式）
-git clone https://github.com/<OWNER>/tactile-data-quality-inspector.git
+git clone https://github.com/JoffinLu/tactile-data-quality-inspector.git
 cd tactile-data-quality-inspector
 pip install -e ".[dev]"     # 含 pytest 等测试依赖
 ```
