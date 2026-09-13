@@ -25,7 +25,7 @@
 
 这个项目做的就是这件事：五维质量指标（SNR / 基线漂移 / 饱和率 / 力异常 / SPC）+ 无监督异常检测（IsolationForest + Mahalanobis），输出自包含的 HTML 报告和可交互的 Streamlit Dashboard，让数据质量从"凭感觉"变成"看数字"。
 
-## 截图
+## 可视化
 
 <div align="center">
 
@@ -36,6 +36,18 @@
 **RCT 全量 1832 序列综合质量分分布**
 
 <img src="docs/assets/quality_distribution.png" alt="质量分布图" width="100%">
+
+**材料质量指纹 — 每类材料在五个指标维度的相对位置（分位雷达，越靠外越优）**
+
+<img src="docs/assets/radar_materials.png" alt="材料质量指纹雷达" width="100%">
+
+**双检测器一致性 — IsolationForest 标记的 92 条异常全部落在 Mahalanobis 异常区**
+
+<img src="docs/assets/anomaly_agreement.png" alt="双检测器一致性散点" width="80%">
+
+**五维指标与综合分的相关结构 — SPC 越限是拖分主力（r = −0.92）**
+
+<img src="docs/assets/correlation_heatmap.png" alt="指标相关热力图" width="60%">
 
 </div>
 
