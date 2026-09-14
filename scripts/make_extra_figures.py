@@ -6,36 +6,31 @@
 3. correlation_heatmap.png 五维指标与综合分的相关热力图
 
 数据源：reports/quality_scores.csv + reports/anomaly_results.csv（真实全量）。
+风格：统一深墨绿暗色主题（scripts/figure_style.py）。
 """
 
 from pathlib import Path
+import sys
 
 import numpy as np
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from figure_style import (  # noqa: E402
+    AMBER, AMBER_RAMP, AMBER_SOFT, BG, BORDER, GRID, GRID_STRONG, GREEN,
+    GREEN_SOFT, MONO, PANEL, SERIF, SANS, TEXT, TEXT_DIM, TEXT_FAINT,
+    apply_theme, hex_to_rgba, theme_axes,
+)
+
 PROJECT = Path(__file__).resolve().parents[1]
 ASSETS = PROJECT / "docs" / "assets"
-FONT = "Microsoft YaHei, Segoe UI, Arial"
 
 q = pd.read_csv(PROJECT / "reports" / "quality_scores.csv")
 a = pd.read_csv(PROJECT / "reports" / "anomaly_results.csv")
 
-palette = px.colors.qualitative.Safe
 materials = sorted(q["material"].unique())
-cmap = {m: palette[i % len(palette)] for i, m in enumerate(materials)}
-
-
-def _rgb_tuple(color: str) -> tuple[int, int, int]:
-    """把 plotly 颜色（'#RRGGBB' 或 'rgb(r,g,b)'）解析为 (r, g, b)。"""
-    if color.startswith("#"):
-        return tuple(int(color[i:i + 2], 16) for i in (1, 3, 5))  # type: ignore[return-value]
-    body = color[color.index("(") + 1: color.index(")")]
-    parts = [int(p) for p in body.split(",")[:3]]
-    return (parts[0], parts[1], parts[2])
-
 
 # --------------------------------------------------------------------------- #
 # Figure 1 — 材料质量指纹雷达（2x4 small multiples）
@@ -64,14 +59,13 @@ fig1 = make_subplots(
 for i, m in enumerate(materials):
     row, col = i // 4 + 1, i % 4 + 1
     vals = mat_mean.loc[m, DIMS].tolist()
-    r_, g_, b_ = _rgb_tuple(cmap[m])
     fig1.add_trace(
         go.Scatterpolar(
             r=vals + vals[:1], theta=DIMS + DIMS[:1],
             fill="toself",
-            fillcolor=f"rgba({r_},{g_},{b_},0.28)",
-            line=dict(color=cmap[m], width=2),
-            marker=dict(size=4, color=cmap[m]),
+            fillcolor=hex_to_rgba(GREEN, 0.16),
+            line=dict(color=GREEN, width=2),
+            marker=dict(size=4, color=GREEN_SOFT),
             showlegend=False,
             name=m,
             hovertemplate="%{theta}: %{r:.2f}<extra>" + m + "</extra>",
@@ -85,7 +79,7 @@ for i in range(1, 9):
     polar_cfg[key] = dict(
         angularaxis=dict(
             categoryorder="array", categoryarray=DIMS,
-            tickfont=dict(size=9, color="#555"),
+            tickfont=dict(family=SANS, size=9.5, color=TEXT_DIM),
             rotation=90, direction="clockwise",
         ),
         radialaxis=dict(
@@ -93,24 +87,21 @@ for i in range(1, 9):
             # 放大材料间差异（分位语义不变：外侧 = 更优）
             range=[0.30, 0.80],
             tickvals=[0.4, 0.5, 0.6, 0.7],
-            tickfont=dict(size=7, color="#999"),
-            gridcolor="rgba(160,160,160,0.30)",
-            linecolor="rgba(160,160,160,0.40)",
+            tickfont=dict(family=MONO, size=7.5, color=TEXT_FAINT),
+            gridcolor=GRID,
+            linecolor=BORDER,
         ),
-        bgcolor="rgba(248,249,251,0.6)",
+        bgcolor=PANEL,
     )
 fig1.update_layout(**polar_cfg)
 for ann in fig1["layout"]["annotations"]:
-    ann["font"] = dict(size=12, color="#333", family=FONT)
-fig1.update_layout(
-    width=1280, height=740,
-    template="plotly_white",
-    font=dict(family=FONT, size=12, color="#333"),
-    title=dict(
-        text="材料质量指纹 — 五维指标分位雷达（分位 1.0 = 全数据集该维最优，径向范围 0.30–0.80）",
-        font=dict(size=16), x=0.02,
-    ),
-    margin=dict(l=40, r=40, t=90, b=30),
+    ann["font"] = dict(family=SERIF, size=13.5, color=TEXT)
+apply_theme(
+    fig1, width=1280, height=780,
+    margin=dict(l=75, r=75, t=140, b=30),
+    eyebrow="TACTILE-QC · MATERIAL FINGERPRINT",
+    title="材料质量指纹",
+    subtitle="五维指标分位雷达 · 分位 1.0 = 全数据集该维最优 · 径向范围 0.30–0.80",
 )
 
 # --------------------------------------------------------------------------- #
@@ -126,10 +117,10 @@ mask_mahal_only = (a["iso_label"] == 1) & (a["mahal_label"] == -1)
 mask_iso_only = (a["iso_label"] == -1) & (a["mahal_label"] == 1)
 
 groups = [
-    ("正常（双检测器一致）", mask_normal, "#B0BEC5", 5, 0.40),
-    ("仅 Mahalanobis 标记", mask_mahal_only, "#E67E22", 9, 0.85),
-    ("仅 IsolationForest 标记", mask_iso_only, "#F4D03F", 9, 0.90),
-    ("双检测器共同标记", mask_both, "#C0392B", 9, 0.95),
+    ("正常（双检测器一致）", mask_normal, TEXT_FAINT, 5, 0.35),
+    ("仅 Mahalanobis 标记", mask_mahal_only, AMBER_SOFT, 9, 0.75),
+    ("仅 IsolationForest 标记", mask_iso_only, AMBER_RAMP[0], 9, 0.85),
+    ("双检测器共同标记", mask_both, AMBER, 9, 0.95),
 ]
 
 fig2 = go.Figure()
@@ -142,7 +133,7 @@ for label, mask, color, size, opac in groups:
             x=sub["iso_score"], y=sub["mahal_log"], mode="markers",
             name=f"{label}（{int(mask.sum())}）",
             marker=dict(color=color, size=size, opacity=opac,
-                        line=dict(width=0.5, color="white")),
+                        line=dict(width=0.5, color=BG)),
             hovertemplate=(
                 "ISO 分 %{x:.4f} | Mahal log₁₀ %{y:.2f}"
                 f"<extra>{label}</extra>"
@@ -151,33 +142,41 @@ for label, mask, color, size, opac in groups:
     )
 
 fig2.add_vline(
-    x=0.0, line_dash="dash", line_color="#888", line_width=1.2,
-    annotation_text="IF 阈值", annotation_font=dict(size=10, color="#888"),
+    x=0.0, line_dash="dash", line_color=GRID_STRONG, line_width=1.2,
+    annotation_text="IF 阈值",
+    annotation_font=dict(family=MONO, size=10, color=TEXT_DIM),
     annotation_position="top",
 )
 fig2.add_hline(
-    y=mah_thr, line_dash="dash", line_color="#888", line_width=1.2,
-    annotation_text="Mahalanobis 阈值", annotation_font=dict(size=10, color="#888"),
+    y=mah_thr, line_dash="dash", line_color=GRID_STRONG, line_width=1.2,
+    annotation_text="Mahalanobis 阈值",
+    annotation_font=dict(family=MONO, size=10, color=TEXT_DIM),
     annotation_position="bottom right",
 )
 
+apply_theme(
+    fig2, width=1000, height=640,
+    margin=dict(l=70, r=40, t=130, b=60),
+    eyebrow="TACTILE-QC · DETECTOR AGREEMENT",
+    title="双检测器一致性",
+    subtitle="IsolationForest ⊂ Mahalanobis · κ = 0.615 · 92 / 1,832 异常",
+)
+theme_axes(fig2)
+fig2.update_xaxes(
+    title=dict(text="IsolationForest 得分（越小越异常）",
+               font=dict(family=SANS, size=13, color=TEXT_DIM)),
+    range=[-0.26, 0.19],
+)
+fig2.update_yaxes(
+    title=dict(text="Mahalanobis 距离（log₁₀ 尺度）",
+               font=dict(family=SANS, size=13, color=TEXT_DIM)),
+)
 fig2.update_layout(
-    width=1000, height=620,
-    template="plotly_white",
-    font=dict(family=FONT, size=13, color="#333"),
-    title=dict(
-        text="双检测器一致性 — IsolationForest ⊂ Mahalanobis（κ = 0.615，92/1832 异常）",
-        font=dict(size=16), x=0.02,
-    ),
-    xaxis=dict(title="IsolationForest 得分（越小越异常）", range=[-0.26, 0.19]),
-    yaxis=dict(title="Mahalanobis 距离（log₁₀ 尺度）"),
     legend=dict(
         yanchor="bottom", y=0.02, xanchor="left", x=0.02,
-        bgcolor="rgba(255,255,255,0.85)",
-        bordercolor="rgba(200,200,200,0.6)", borderwidth=1,
-        font=dict(size=12),
+        bgcolor=PANEL, bordercolor=BORDER, borderwidth=1,
+        font=dict(family=SANS, size=12, color=TEXT_DIM),
     ),
-    margin=dict(l=70, r=40, t=80, b=60),
 )
 
 # --------------------------------------------------------------------------- #
@@ -190,17 +189,26 @@ corr_src = q[cols].copy()
 corr_src["drift_slope"] = corr_src["drift_slope"].abs()
 corr = corr_src.corr()
 
+# 自定义发散色标：琥珀（负相关/警示）→ 墨绿（0）→ 亮绿（正相关）
+diverging = [[0.0, AMBER_RAMP[3]], [0.5, PANEL], [1.0, GREEN]]
+
 fig3 = go.Figure(
     go.Heatmap(
         z=corr.values, x=labels, y=labels,
         zmin=-1, zmax=1,
-        colorscale="RdBu", reversescale=True,
-        colorbar=dict(title="Pearson r", thickness=15, len=0.85),
-        xgap=2, ygap=2,
+        colorscale=diverging,
+        colorbar=dict(
+            title=dict(text="Pearson r",
+                       font=dict(family=MONO, size=11, color=TEXT_DIM)),
+            thickness=14, len=0.85,
+            tickfont=dict(family=MONO, size=10.5, color=TEXT_DIM),
+            outlinecolor=BORDER, outlinewidth=1,
+        ),
+        xgap=4, ygap=4,
         hovertemplate="%{y} × %{x}<br>r = %{z:.3f}<extra></extra>",
     )
 )
-# 数值用 annotation 逐格叠加：深色格（|r|>0.6）自动换白字，浅色格用深灰字；
+# 数值用 annotation 逐格叠加：亮色格（|r| 大）配深墨绿字，暗格配浅灰绿字；
 # 对角线自相关恒为 1 且无信息量，跳过
 for i in range(len(labels)):
     for j in range(len(labels)):
@@ -210,18 +218,18 @@ for i in range(len(labels)):
         fig3.add_annotation(
             x=labels[j], y=labels[i],
             text=f"{zval:.2f}", showarrow=False,
-            font=dict(size=12, color="#ffffff" if abs(zval) > 0.6 else "#222"),
+            font=dict(family=MONO, size=12,
+                      color=BG if abs(zval) > 0.55 else TEXT_DIM),
         )
 fig3.update_yaxes(autorange="reversed")
-fig3.update_layout(
-    width=820, height=680,
-    template="plotly_white",
-    font=dict(family=FONT, size=12, color="#333"),
-    title=dict(
-        text="五维指标与综合分的相关结构（Pearson r，n=1832）",
-        font=dict(size=16), x=0.02,
-    ),
-    margin=dict(l=90, r=60, t=80, b=60),
+fig3.update_xaxes(tickfont=dict(family=SANS, size=11.5, color=TEXT_DIM))
+fig3.update_yaxes(tickfont=dict(family=SANS, size=11.5, color=TEXT_DIM))
+apply_theme(
+    fig3, width=820, height=700,
+    margin=dict(l=90, r=60, t=130, b=60),
+    eyebrow="TACTILE-QC · CORRELATION STRUCTURE",
+    title="指标相关结构",
+    subtitle="Pearson r · n = 1,832 · SPC 越限是拖分主力（r = −0.92）",
 )
 
 # --------------------------------------------------------------------------- #

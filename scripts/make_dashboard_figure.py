@@ -1,25 +1,31 @@
 # -*- coding: utf-8 -*-
 """生成 README 用的 Dashboard 配图（docs/assets/dashboard.png）。
 
-忠实复刻 Streamlit Dashboard 的 Overview 页：顶部 KPI 条 + 质量分直方图
-（按材料着色）+ 按材料类别的异常率条形图。数据来自真实全量结果。
+忠实复刻 Streamlit Dashboard 的 Overview 页：顶部 KPI 卡片 + 质量分直方图
+（按材料堆叠）+ 按材料类别的异常率条形图。数据来自真实全量结果。
 
-排版要点（v2）：
-- KPI 条改用 shape + annotation 实现，避免 go.Table 强制折行
-- 图例改到右侧外部（orientation='v' + margin.r=200），不再压直方图
-- 直方图 x 轴标题下方留出充足间距
+风格：统一深墨绿暗色主题（scripts/figure_style.py）。
+排版要点（v3）：
+- KPI 改为 4 张卡片（paper 坐标 shape + annotation），大数字 + mono 标签
+- 直方图堆叠（barmode=stack），绿色系明度渐变，图例右侧独立区域
+- 条形图省略 x 刻度，异常率由条端数值标签直接表达
 """
 
 from pathlib import Path
+import sys
 
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from figure_style import (  # noqa: E402
+    AMBER, BG, BORDER, GREEN, GREEN_RAMP, GREEN_SOFT, MONO, PANEL, SERIF,
+    SANS, TEXT, TEXT_DIM, TEXT_FAINT, apply_theme, card, hex_to_rgba,
+    theme_axes,
+)
 
 PROJECT = Path(__file__).resolve().parents[1]
 OUT = PROJECT / "docs" / "assets" / "dashboard.png"
-FONT = "Microsoft YaHei, Segoe UI, Arial"
 
 q = pd.read_csv(PROJECT / "reports" / "quality_scores.csv")
 a = pd.read_csv(PROJECT / "reports" / "anomaly_results.csv")
@@ -32,62 +38,85 @@ n_anom = int((df["iso_label"] == -1).sum())
 anom_rate = n_anom / n
 n_mat = df["material"].nunique()
 
-palette = px.colors.qualitative.Safe
-cmap = {m: palette[i % len(palette)] for i, m in enumerate(sorted(df["material"].unique()))}
+materials = sorted(df["material"].unique())
+cmap = {m: GREEN_RAMP[i % len(GREEN_RAMP)] for i, m in enumerate(materials)}
+
+fig = go.Figure()
 
 # --------------------------------------------------------------------------- #
-# 3 行布局：第1行 domain 占位放 KPI 横幅（用 shape + annotation 渲染）；
-# 第2行直方图；第3行按材料异常率条形图。
+# 布局：margin=0，paper 坐标 = 整张画布（0–1），全部子区用手动 domain 排布。
+#   标题 y 0.965–1.0 | KPI 卡片 y 0.80–0.935
+#   直方图 y [0.40, 0.735] x [0.06, 0.70] + 图例右侧
+#   条形图 y [0.055, 0.28] x [0.16, 0.985]（左侧留材质标签）
 # --------------------------------------------------------------------------- #
-fig = make_subplots(
-    rows=3, cols=1,
-    row_heights=[0.09, 0.46, 0.45],
-    vertical_spacing=0.07,
-    specs=[[{"type": "domain"}], [{"type": "xy"}], [{"type": "xy"}]],
+apply_theme(
+    fig, width=1280, height=960,
+    margin=dict(l=0, r=0, t=0, b=0),
+    eyebrow="TACTILE-QC · DASHBOARD OVERVIEW",
+    title="RCT 全量 1,832 序列 · 质量总览",
+    subtitle="五维指标（SNR / 漂移 / 饱和 / 力异常 / SPC）+ IsolationForest 异常标记 · 基于真实全量数据复刻",
 )
 
-# --- KPI 横幅：用 rect + annotation，避免 go.Table 强制折行 --- #
-fig.add_shape(
-    type="rect", xref="paper", yref="paper",
-    x0=0.0, x1=1.0, y0=0.915, y1=0.995,
-    fillcolor="rgba(245,247,250,1)",
-    line=dict(color="rgba(220,225,232,1)", width=1),
-    layer="below",
-)
-fig.add_annotation(
-    xref="paper", yref="paper",
-    x=0.5, y=0.955, showarrow=False,
-    xanchor="center", yanchor="middle",
-    text=(
-        f"<b style='color:#4C78A8;font-size:22px'>{n:,}</b> "
-        f"<span style='color:#555;font-size:13px'>总序列</span> &nbsp;|&nbsp; "
-        f"<b style='color:#54A24B;font-size:22px'>{n_mat}</b> "
-        f"<span style='color:#555;font-size:13px'>材料类别</span> &nbsp;|&nbsp; "
-        f"<b style='color:#F58518;font-size:22px'>{mean_q:.1f}</b> "
-        f"<span style='color:#555;font-size:13px'>平均质量分</span> &nbsp;|&nbsp; "
-        f"<b style='color:#E45756;font-size:22px'>{n_anom}</b> "
-        f"<span style='color:#555;font-size:13px'>异常序列</span> "
-        f"<span style='color:#E45756;font-size:13px'>({anom_rate:.1%})</span>"
-    ),
-    font=dict(family=FONT, size=13, color="#333"),
-)
+# --- KPI 卡片区：4 张卡片 --- #
+kpis = [
+    (f"{n:,}", "总序列", TEXT),
+    (f"{n_mat}", "材料类别", TEXT),
+    (f"{mean_q:.1f}", "平均质量分", GREEN),
+    (f"{n_anom}", f"异常序列 · {anom_rate:.1%}", AMBER),
+]
+CARD_Y0, CARD_Y1 = 0.775, 0.895
+for i, (value, label, color) in enumerate(kpis):
+    x0 = 0.022 + i * 0.2375
+    x1 = x0 + 0.225
+    card(fig, x0, x1, CARD_Y0, CARD_Y1)
+    fig.add_annotation(
+        xref="paper", yref="paper", x=(x0 + x1) / 2, y=CARD_Y1 - 0.045,
+        showarrow=False, xanchor="center", yanchor="middle",
+        text=f"<span style='font-family:{SERIF};font-size:27px;color:{color}'>"
+             f"{value}</span>",
+    )
+    fig.add_annotation(
+        xref="paper", yref="paper", x=(x0 + x1) / 2, y=CARD_Y0 + 0.028,
+        showarrow=False, xanchor="center", yanchor="middle",
+        text=f"<span style='font-family:{MONO};font-size:10.5px;"
+             f"color:{TEXT_DIM}'>{label.upper()}</span>",
+    )
 
-# --- (row2) 质量分直方图（按材料着色，overlay）--- #
-for m in sorted(df["material"].unique()):
+# --- 直方图：按材料堆叠，绿色系明度渐变 --- #
+for m in materials:
     sub = df[df["material"] == m]
     fig.add_trace(
         go.Histogram(
             x=sub["quality_score"], name=f"{m} (n={len(sub)})",
-            marker_color=cmap[m], nbinsx=28, opacity=0.78,
+            marker=dict(color=cmap[m], line=dict(color=BG, width=0.6)),
+            nbinsx=28, xaxis="x", yaxis="y",
             hovertemplate=f"{m}<br>质量分 %{{x}}<br>频数 %{{y}}<extra></extra>",
         ),
-        row=2, col=1,
     )
-fig.update_xaxes(title_text="综合质量分（0–100）", row=2, col=1)
-fig.update_yaxes(title_text="序列数", row=2, col=1)
-fig.update_layout(barmode="overlay", bargap=0.03)
 
-# --- (row3) 按材料异常率横向条形图 --- #
+fig.update_layout(
+    barmode="stack", bargap=0.04,
+    xaxis=dict(domain=[0.06, 0.70], anchor="y",
+               tick0=20, dtick=10,
+               title=dict(text="综合质量分（0–100）",
+                          font=dict(family=SANS, size=13, color=TEXT_DIM))),
+    yaxis=dict(domain=[0.40, 0.735], anchor="x",
+               title=dict(text="序列数",
+                          font=dict(family=SANS, size=13, color=TEXT_DIM))),
+    legend=dict(
+        orientation="v",
+        xref="paper", yref="paper",
+        xanchor="left", x=0.735,
+        yanchor="top", y=0.735,
+        font=dict(family=SANS, size=11.5, color=TEXT_DIM),
+        bgcolor=PANEL, bordercolor=BORDER, borderwidth=1,
+        title=dict(text="<span style='font-family:%s;font-size:10.5px;"
+                        "color:%s'>材料</span>" % (MONO, TEXT_DIM)),
+    ),
+)
+theme_axes(fig, tick_size=11.5)
+
+# --- 条形图：按材料异常率（横向，升序） --- #
 g = (
     df.assign(anomaly=df["iso_label"] == -1)
     .groupby("material")["anomaly"]
@@ -100,43 +129,29 @@ for _, r in g.iterrows():
     fig.add_trace(
         go.Bar(
             x=[r["anomaly_ratio"]], y=[f"{r['material']} (n={r['n']})"],
-            orientation="h", marker_color=cmap[r["material"]],
+            orientation="h", xaxis="x2", yaxis="y2",
+            marker=dict(color=GREEN),
             text=[f"{r['anomaly_ratio']:.1%}"], textposition="outside",
-            textfont=dict(size=11, color="#444"),
+            textfont=dict(family=MONO, size=11, color=GREEN_SOFT),
             showlegend=False,
             hovertemplate=(
                 f"{r['material']}<br>异常 {r['n_anomaly']}/{r['n']} "
                 f"({r['anomaly_ratio']:.1%})<extra></extra>"
             ),
         ),
-        row=3, col=1,
     )
-fig.update_xaxes(
-    title_text="异常率（IsolationForest）",
-    tickformat=".0%", range=[0, 0.085],
-    row=3, col=1,
-)
-fig.update_yaxes(tickfont=dict(size=11), row=3, col=1)
 
 fig.update_layout(
-    width=1280, height=820,
-    template="plotly_white",
-    font=dict(family=FONT, size=13, color="#333"),
-    margin=dict(l=60, r=200, t=64, b=50),
-    legend=dict(
-        # 移到右侧外部，竖直排布；不再遮挡直方图
-        orientation="v",
-        yanchor="middle", y=0.72,
-        xanchor="left", x=1.02,
-        font=dict(size=10, color="#444"),
-        bgcolor="rgba(255,255,255,0.6)",
-        bordercolor="rgba(220,225,232,1)",
-        borderwidth=1,
-    ),
-    title=dict(
-        text="tactile-qc Dashboard · Overview（RCT 全量 1,832 序列）",
-        font=dict(size=17), x=0.01,
-    ),
+    xaxis2=dict(domain=[0.16, 0.985], anchor="y2", range=[0, 0.085],
+                showticklabels=False, showgrid=False),
+    yaxis2=dict(domain=[0.055, 0.28], anchor="x2",
+                tickfont=dict(family=SANS, size=11.5, color=TEXT_DIM)),
+)
+fig.add_annotation(
+    xref="paper", yref="paper", x=0.985, y=0.305,
+    showarrow=False, xanchor="right", yanchor="middle",
+    text=f"<span style='font-family:{MONO};font-size:10.5px;"
+         f"color:{TEXT_FAINT}'>ISOLATIONFOREST 异常率 →</span>",
 )
 
 OUT.parent.mkdir(parents=True, exist_ok=True)
