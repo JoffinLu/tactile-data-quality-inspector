@@ -155,7 +155,7 @@ fig2.add_hline(
 )
 
 apply_theme(
-    fig2, width=1000, height=640,
+    fig2, width=1280, height=700,
     margin=dict(l=70, r=40, t=130, b=60),
     eyebrow="TACTILE-QC · DETECTOR AGREEMENT",
     title="双检测器一致性",
@@ -224,9 +224,14 @@ for i in range(len(labels)):
 fig3.update_yaxes(autorange="reversed")
 fig3.update_xaxes(tickfont=dict(family=SANS, size=11.5, color=TEXT_DIM))
 fig3.update_yaxes(tickfont=dict(family=SANS, size=11.5, color=TEXT_DIM))
+# 画布与其他 README 图等宽（1280）；热力图区域用 xaxis domain 收窄并居中，
+# 保持格子接近正方形，避免全宽拉伸后格子变扁
+fig3.update_layout(
+    xaxis=dict(domain=[0.13, 0.69], anchor="y"),
+)
 apply_theme(
-    fig3, width=820, height=700,
-    margin=dict(l=90, r=60, t=130, b=60),
+    fig3, width=1280, height=820,
+    margin=dict(l=110, r=130, t=130, b=70),
     eyebrow="TACTILE-QC · CORRELATION STRUCTURE",
     title="指标相关结构",
     subtitle="Pearson r · n = 1,832 · SPC 越限是拖分主力（r = −0.92）",

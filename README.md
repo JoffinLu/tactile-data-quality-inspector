@@ -43,11 +43,11 @@
 
 **双检测器一致性 — IsolationForest 标记的 92 条异常全部落在 Mahalanobis 异常区**
 
-<img src="docs/assets/anomaly_agreement.png" alt="双检测器一致性散点" width="80%">
+<img src="docs/assets/anomaly_agreement.png" alt="双检测器一致性散点" width="100%">
 
 **五维指标与综合分的相关结构 — SPC 越限是拖分主力（r = −0.92）**
 
-<img src="docs/assets/correlation_heatmap.png" alt="指标相关热力图" width="60%">
+<img src="docs/assets/correlation_heatmap.png" alt="指标相关热力图" width="100%">
 
 </div>
 
